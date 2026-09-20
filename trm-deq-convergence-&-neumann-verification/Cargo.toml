@@ -1,0 +1,72 @@
+[package]
+name = "trm_omega"
+version = "10.2.0"
+edition = "2021"
+build = "build.rs"
+readme = "README.md"
+description = "TRM-Omega v10.2 — Recursive Reasoning Engine — Training + Inference"
+
+[features]
+default = ["cpu"]
+# Custom KernelBank via the CUDA driver API (needs nvcuda + PTX from nvcc).
+cuda = ["dep:cudarc"]
+# Place Candle tensors on the GPU (needs the CUDA toolkit at link time).
+candle-cuda = ["cuda", "candle-core/cuda", "candle-nn/cuda"]
+cpu  = []  # CPU-only fallback
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+memmap2 = "0.9"
+safetensors = "0.4"
+byteorder = "1.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rand = { version = "0.8", features = ["std_rng"] }
+rand_distr = "0.4"
+rayon = "1.10"
+log = "0.4"
+env_logger = "0.11"
+bytemuck = { version = "1.16", features = ["derive"] }
+crossbeam-channel = "0.5"
+
+candle-core = { version = "=0.8.1" }
+candle-nn  = "=0.8.1"
+cudarc = { version = "0.12", features = ["driver", "nvrtc", "cuda-12060"], optional = true }
+
+[build-dependencies]
+anyhow = "1.0"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3.10"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+[[bin]]
+name = "forge"
+path = "src/bin/forge.rs"
+
+[[bin]]
+name = "server"
+path = "src/bin/server.rs"
+
+[[bin]]
+name = "eval"
+path = "src/bin/eval.rs"
+
+[[bin]]
+name = "train"
+path = "src/bin/train.rs"
+
+[[bin]]
+name = "setup"
+path = "src/bin/setup.rs"
+
+[[bench]]
+name = "benchmarks"
+harness = false

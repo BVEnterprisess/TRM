@@ -1,0 +1,28 @@
+{
+  "gpu": {
+    "name": "NVIDIA GeForce GTX 1660",
+    "total_mb": 6144.0,
+    "used_mb": 1322.0,
+    "free_mb": 4645.0
+  },
+  "process": {
+    "pid": 11080,
+    "used_mb": 97.30078125,
+    "source": "wddm-vidmm",
+    "dedicated_mb": 97.30078125,
+    "shared_mb": 66.0,
+    "cuda_free_mb": 5102.0,
+    "cuda_total_mb": 6143.5625
+  },
+  "budget": {
+    "total_vram_mb": 6144,
+    "usable_vram_mb": 5120
+  },
+  "inference_est_mb": 237.0263900756836,
+  "training_est_mb": 2401.06982421875,
+  "readme_inference_mb": [
+    150.0,
+    300.0
+  ],
+  "readme_training_mb": 2048.0
+}

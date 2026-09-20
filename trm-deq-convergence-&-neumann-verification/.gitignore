@@ -1,0 +1,14 @@
+/target
+.rustup/
+.cargo/
+.env
+*.log
+.DS_Store
+checkpoints/
+*.safetensors
+*.trmq10
+scratch/
+node_modules/
+dist/
+build/
+coverage/
