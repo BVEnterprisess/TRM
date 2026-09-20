@@ -6,6 +6,7 @@ use clap::Parser;
 use candle_core::Tensor;
 use trm_omega::default_device;
 use trm_omega::network::{NetworkConfig, NetworkVariant};
+use trm_omega::preset;
 use trm_omega::recursion::{TrmConfig, TrmModel};
 
 #[derive(Parser, Debug)]
@@ -22,6 +23,10 @@ struct Args {
 
     #[arg(long, default_value_t = 100)]
     iters: usize,
+
+    /// Named architecture: tiny, paper, 7m. Overrides --dim / --heads / --layers.
+    #[arg(long)]
+    preset: Option<String>,
 
     #[arg(long, default_value_t = 256)]
     dim: usize,
@@ -65,6 +70,7 @@ fn main() -> Result<()> {
     let _ = trm_omega::setup::ensure_dependencies(args.auto_install);
 
     let device = default_device()?;
+    let (dim, heads, layers) = preset::resolve(args.preset.as_deref(), args.dim, args.heads, args.layers)?;
     let variant = match args.variant.as_str() {
         "mixer" => NetworkVariant::MlpMixer,
         _ => NetworkVariant::Transformer,
@@ -72,11 +78,11 @@ fn main() -> Result<()> {
 
     let net_cfg = NetworkConfig {
         variant,
-        dim: args.dim,
-        num_heads: args.heads,
+        dim,
+        num_heads: heads,
         max_seq_len: args.seq_len * 3,
         vocab_size: args.vocab,
-        num_layers: args.layers,
+        num_layers: layers,
         ..Default::default()
     };
     let trm_cfg = TrmConfig {
@@ -148,7 +154,7 @@ fn main() -> Result<()> {
     let report = trm_omega::memory::build_vram_report(
         args.batch,
         args.seq_len,
-        args.dim,
+        dim,
         8,
         Some(model.param_count()),
     );

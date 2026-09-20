@@ -5,6 +5,7 @@ use clap::Parser;
 
 use trm_omega::default_device;
 use trm_omega::network::NetworkConfig;
+use trm_omega::preset;
 use trm_omega::recursion::{TrmConfig, TrmModel};
 use trm_omega::trmq10;
 
@@ -16,6 +17,10 @@ struct Args {
 
     #[arg(short, long)]
     output: PathBuf,
+
+    /// Named architecture: tiny, paper, 7m. Overrides --dim / --heads / --layers.
+    #[arg(long)]
+    preset: Option<String>,
 
     #[arg(long, default_value_t = 256)]
     dim: usize,
@@ -36,14 +41,18 @@ struct Args {
 fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
+    let (dim, heads, layers) = preset::resolve(args.preset.as_deref(), args.dim, args.heads, args.layers)?;
+    if let Some(name) = args.preset.as_deref() {
+        eprintln!("preset '{name}' -> dim={dim} heads={heads} layers={layers}");
+    }
 
     let device = default_device()?;
     let net_cfg = NetworkConfig {
-        dim: args.dim,
-        num_heads: args.heads,
+        dim,
+        num_heads: heads,
         max_seq_len: args.max_seq,
         vocab_size: args.vocab,
-        num_layers: args.layers,
+        num_layers: layers,
         ..Default::default()
     };
     let trm_cfg = TrmConfig::default();

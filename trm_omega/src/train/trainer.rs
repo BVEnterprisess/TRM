@@ -79,6 +79,8 @@ pub struct TrainConfig {
     pub seed: u64,
     pub no_augment: bool,
     pub num_data_workers: usize,
+    /// Stop after this many optimizer steps. `None` means run until `max_epochs`.
+    pub max_steps: Option<usize>,
 }
 
 impl Default for TrainConfig {
@@ -112,6 +114,7 @@ impl Default for TrainConfig {
             seed: 42,
             no_augment: false,
             num_data_workers: 4,
+            max_steps: None,
         }
     }
 }
@@ -316,6 +319,12 @@ impl Trainer {
         Ok(())
     }
 
+    fn hit_max_steps(&self) -> bool {
+        self.config
+            .max_steps
+            .is_some_and(|max| self.meta.global_step >= max as u64)
+    }
+
     pub fn load_data(&self) -> Result<(Vec<TokenizedExample>, Vec<TokenizedExample>)> {
         match self.config.task_type {
             TaskType::Arc => {
@@ -338,14 +347,29 @@ impl Trainer {
     }
 
     pub fn train(&mut self) -> Result<()> {
+        let live = self.model.param_count();
+        eprintln!(
+            "TRM-Omega train  device={:?}  live_params={} ({:.3}M)  dim={} heads={} layers={}  batch={} micro={}  task={:?}  max_steps={:?}",
+            self.model.device,
+            live,
+            live as f64 / 1e6,
+            self.model.net_cfg.dim,
+            self.model.net_cfg.num_heads,
+            self.model.net_cfg.num_layers,
+            self.current_batch_size,
+            self.config.micro_batch_size,
+            self.config.task_type,
+            self.config.max_steps,
+        );
         log::info!("=======================================================");
         log::info!(" TRM-Omega v10.2 Training Session");
         log::info!(" device      : {:?}", self.model.device);
-        log::info!(" params      : {:.2}M live / ~{:.2}M layer est", self.model.param_count() as f64 / 1e6, self.model.net_cfg.param_count_estimate() as f64 / 1e6);
+        log::info!(" params      : {:.2}M live / ~{:.2}M layer est", live as f64 / 1e6, self.model.net_cfg.param_count_estimate() as f64 / 1e6);
         log::info!(" batch       : {} (effective)  micro {}", self.current_batch_size, self.config.micro_batch_size);
         log::info!(" task        : {:?}", self.config.task_type);
         log::info!(" DEQ mode    : {}", self.model.trm_cfg.use_deq);
         log::info!(" fp16 flag   : {} (unused; tensors stay F32)", self.config.use_fp16);
+        log::info!(" max_steps   : {:?}", self.config.max_steps);
         log::info!("=======================================================");
 
         let (train_data, val_data) = self.load_data()?;
@@ -376,6 +400,11 @@ impl Trainer {
             if (epoch + 1) % self.config.save_every_epochs == 0 {
                 self.meta.current_batch_size = self.current_batch_size;
                 save_checkpoint(&self.config.checkpoint_dir, &format!("epoch_{}", epoch + 1), &self.model.varmap, &self.ema, &self.meta)?;
+            }
+
+            if self.hit_max_steps() {
+                log::info!("hit --max-steps {} at epoch {}", self.config.max_steps.unwrap(), epoch + 1);
+                break;
             }
         }
 
@@ -418,6 +447,9 @@ impl Trainer {
                 epoch_loss += grad_accum / accum_steps as f64;
                 epoch_batches += 1;
                 grad_accum = 0.0;
+                if self.hit_max_steps() {
+                    break;
+                }
             }
         }
 

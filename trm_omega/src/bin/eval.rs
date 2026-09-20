@@ -4,6 +4,7 @@ use clap::Parser;
 use trm_omega::data::load_arc_tasks;
 use trm_omega::default_device;
 use trm_omega::network::{NetworkConfig, NetworkVariant};
+use trm_omega::preset;
 use trm_omega::recursion::TrmConfig;
 use trm_omega::task_eval::evaluate_arc_tasks;
 use trm_omega::trmq10;
@@ -14,6 +15,7 @@ struct Args {
     #[arg(long)] model: String,
     #[arg(long)] data_dir: PathBuf,
     #[arg(long, default_value_t = 1000)] n_augmentations: usize,
+    #[arg(long)] preset: Option<String>,
     #[arg(long, default_value_t = 256)] dim: usize,
     #[arg(long, default_value_t = 8)] heads: usize,
     #[arg(long, default_value_t = 11)] vocab: usize,
@@ -25,14 +27,15 @@ struct Args {
 fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
+    let (dim, heads, layers) = preset::resolve(args.preset.as_deref(), args.dim, args.heads, args.layers)?;
     let device = default_device()?;
     let net_cfg = NetworkConfig {
         variant: NetworkVariant::Transformer,
-        dim: args.dim,
-        num_heads: args.heads,
+        dim,
+        num_heads: heads,
         max_seq_len: 900 * 3,
         vocab_size: args.vocab,
-        num_layers: args.layers,
+        num_layers: layers,
         ..Default::default()
     };
     let trm_cfg = TrmConfig {

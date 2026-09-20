@@ -1,0 +1,12 @@
+{
+  "dim": 448,
+  "ffn_hidden": 1200,
+  "heads": 8,
+  "layer_est": 4834816,
+  "layers": 2,
+  "live_params": 6787969,
+  "live_params_m": 6.787969,
+  "max_puzzles": 4096,
+  "preset": "7m",
+  "vocab": 11
+}

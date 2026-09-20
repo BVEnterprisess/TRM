@@ -56,7 +56,8 @@ Paper-config training **fits** on this 1660 but is tight: **5038 MiB dedicated**
 |---|---|
 | `cpu` (default) | Candle on CPU. Packed path uses `kernel_ref` (CPU clones of the `.cu` loops). |
 | `cuda` | Loads nvcc PTX into `cudarc` KernelBank. Inference / quantized GEMM only. Training autograd stays on Candle. |
-| `candle-cuda` | `cuda` plus Candle tensors on GPU (`Device::new_cuda(0)`). Needs the CUDA toolkit at **link** time. Training GEMMs can live on the 1660. Packed inference still uses KernelBank, not Candle CUDA storage pointers. |
+| `candle-cuda` | Candle tensors on GPU (`Device::new_cuda(0)`). Does **not** compile KernelBank. Train on a rented Linux GPU with this feature alone. Needs libcudart at **link** time. |
+| `candle-cuda,cuda` | Train on Candle CUDA **and** compile KernelBank PTX. Only needed if you also want packed kernels in the same binary. |
 
 ```bash
 cargo test --features cpu
@@ -100,14 +101,42 @@ Training and inference are the same `TrmModel`. `--kernels` / `pack_ternary_infe
 
 ## Train / eval / forge / serve
 
+Train **once** on a rented Linux GPU (≥16 GB). Quantize. Infer forever on the 1660.
+
+Named presets (depth stays 2; scaling is **dim**):
+
+| `--preset` | dim | heads | layers | live params |
+|---|---|---|---|---|
+| `tiny` | 32 | 4 | 2 | ~0.16M smoke |
+| `paper` | 256 | 8 | 2 | **2.67M** measured |
+| `7m` | 448 | 8 | 2 | **6,787,969** (6.788M, instantiated) |
+
 ```bash
-cargo run --release --bin train -- --task arc --data-dir ./data --dim 256 --heads 8 --layers 2 --l-cycles 6 --n-sup 16
-cargo run --release --bin eval -- --model checkpoints/best.safetensors --data-dir ./data/arc
-cargo run --release --bin forge -- --input checkpoints/best.safetensors --output model.trmq10
-cargo run --release --features cuda --bin server -- --model model.trmq10 --kernels --batch 1 --seq-len 81
+# Instantiates 7m on CPU and prints live_params. No GPU.
+cargo run --release --bin train -- --preset 7m --print-params
+
+# Rented Linux GPU (Colab T4 / RunPod / Vast / Lambda)
+# candle-cuda does not compile KernelBank. Sequence 81, batch 1, F32.
+bash scripts/cloud_train.sh          # STAGE=print
+STAGE=smoke bash scripts/cloud_train.sh
+STAGE=paper bash scripts/cloud_train.sh
+STAGE=7m    bash scripts/cloud_train.sh   # 1-step soak; OOM => rent 24 GB+
+STAGE=train bash scripts/cloud_train.sh   # real 7m run, still seq 81
+STAGE=forge bash scripts/cloud_train.sh   # writes artifacts/cloud_ckpt/model.trmq10
 ```
 
-`--fp16` defaults on; disable with `--fp16=false` (not `--fp16 false`).
+Copy `final.safetensors` or `model.trmq10` off the rental. **Build `server` on the 1660** (`--features cuda`). Do not copy a cloud CUDA binary.
+
+```bash
+# 1660 inference
+cargo run --release --features cuda --bin forge -- --input final.safetensors --output model.trmq10 --preset 7m --max-seq 243
+cargo run --release --features cuda --bin server -- --model model.trmq10 --kernels --preset 7m --seq-len 81 --batch 1 --iters 4
+cargo run --release --bin eval -- --model model.trmq10 --data-dir ./data --preset 7m
+```
+
+`--fp16` defaults on and is unused (tensors stay F32). Disable with `--fp16=false` (not `--fp16 false`). Cloud soaks must pass `--fp16=false --batch-size 1 --micro-batch 1 --max-steps 1`.
+
+Do **not** start at ARC 30×30 (seq 900). Keep `--task sudoku` (seq 81) until a 7m checkpoint exists.
 
 `server` writes `artifacts/kernels_bench.json` and `artifacts/vram_probe.json`.
 
@@ -128,7 +157,7 @@ cargo run --release --features cuda --bin server -- --model model.trmq10 --kerne
 
 1. `ternary_matmul_stack` is co-hotspot with attention on packed inference (nsys ~45%). Speed work, not a close-out blocker.
 2. Wire `--fp16` or DEQ if you want headroom under 6 GB; F32 paper train leaves ~270 MiB free on the board.
-3. Honest 7M scaling: this default is **2.67M** live params. A 7M run needs a different dim/depth and likely will not fit this card in F32 unroll.
+3. 7M is `--preset 7m` (dim 448, 2 layers). Train it off-box (`scripts/cloud_train.sh`). The 1660 is inference-only after forge.
 4. Data loaders / ARC training that is more than the smoke tests (quality, not the 1660 stack).
 
 **Not goals**
