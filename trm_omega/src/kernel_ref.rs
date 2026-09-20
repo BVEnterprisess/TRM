@@ -192,7 +192,8 @@ pub fn apply_rope(q_or_k: &mut [f32], cos: &[f32], sin: &[f32], batch: usize, he
     }
 }
 
-/// Two-pass softmax attention matching `fused_attention` in `attention.cu`.
+/// Softmax attention matching `fused_attention` in `attention.cu`
+/// (CPU two-pass; CUDA uses an algebraically equivalent online softmax).
 pub fn fused_attention(
     q: &[f32],
     k: &[f32],

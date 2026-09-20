@@ -1,0 +1,26 @@
+{
+  "batch": 1,
+  "device": "Cuda(CudaDevice(DeviceId(1)))",
+  "dim": 256,
+  "date": "2026-09-20",
+  "note": "One F32 candle-cuda sudoku step at paper shape. Analytic estimate at soak time was ~569 MB; measured dedicated is 5038 MiB.",
+  "gpu": {
+    "free_mb": 94.0,
+    "name": "NVIDIA GeForce GTX 1660",
+    "total_mb": 6144.0,
+    "used_mb": 5873.0
+  },
+  "live_params": 2674625,
+  "n_l": 6,
+  "n_sup": 16,
+  "process": {
+    "dedicated_mb": 5037.67578125,
+    "pid": 14768,
+    "shared_mb": 2278.0,
+    "source": "wddm-vidmm",
+    "used_mb": 5037.67578125
+  },
+  "seq": 81,
+  "secs": 10.1,
+  "loss": 368.3263
+}

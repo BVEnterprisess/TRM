@@ -42,6 +42,8 @@ powershell -File .cursor/skills/observing-gpu-host-bounce/scripts/profile-kernel
 powershell -File .cursor/skills/observing-gpu-host-bounce/scripts/profile-kernels.ps1 -Mode sanitizer
 ```
 
+Prefer **Nsight Systems** `nsys.exe` (2024.5+). The copy bundled under Nsight Compute 2024.3 fails without admin ETW (`ReflexStatsTraceLoggingProvider`). Profile `server.exe`, not `cargo`.
+
 Install CUDA **12.6** Nsight pieces only (never `winget Nvidia.CUDA` 13.x over this toolkit):
 
 ```powershell

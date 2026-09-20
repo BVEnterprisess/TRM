@@ -1,6 +1,5 @@
 # Find nsys / ncu / compute-sanitizer on this Windows box and run the
-# matching TRM-Omega packed-inference profile. Default crate is the nested
-# historical folder name.
+# matching TRM-Omega packed-inference profile.
 param(
     [ValidateSet("nsys", "ncu", "sanitizer", "which")]
     [string]$Mode = "which",
@@ -10,9 +9,32 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-function Find-Tool([string]$exe) {
+function Find-OnPath([string]$exe) {
     $cmd = Get-Command $exe -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
+    return $null
+}
+
+function Find-NsightSystemsNsys {
+    $root = Join-Path ${env:ProgramFiles} "NVIDIA Corporation"
+    if (-not (Test-Path $root)) { return $null }
+    $hit = Get-ChildItem $root -Directory -Filter "Nsight Systems *" -ErrorAction SilentlyContinue |
+        Sort-Object Name -Descending |
+        ForEach-Object {
+            $p = Join-Path $_.FullName "target-windows-x64\nsys.exe"
+            if (Test-Path $p) { $p }
+        } |
+        Select-Object -First 1
+    return $hit
+}
+
+function Find-Tool([string]$exe) {
+    $pathHit = Find-OnPath $exe
+    if ($pathHit) { return $pathHit }
+    if ($exe -eq "nsys.exe") {
+        $sys = Find-NsightSystemsNsys
+        if ($sys) { return $sys }
+    }
     $roots = @(
         "${env:ProgramFiles}\NVIDIA Corporation",
         "${env:ProgramFiles}\NVIDIA GPU Computing Toolkit\CUDA\v12.6"
@@ -55,19 +77,36 @@ Set-Location $Crate
 $art = Join-Path $Crate "artifacts"
 New-Item -ItemType Directory -Force -Path $art | Out-Null
 
-$server = @("run", "--release", "--features", "cuda", "--bin", "server", "--", "--kernels", "--batch", "1", "--seq-len", "81", "--iters", "2", "--n-l", "2", "--n-sup", "2")
+function Get-ServerExe {
+    Write-Host "building server (release, cuda)..."
+    cargo build --release --features cuda --bin server
+    if ($LASTEXITCODE -ne 0) { throw "cargo build failed: $LASTEXITCODE" }
+    $target = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $Crate "target" }
+    $exe = Join-Path $target "release\server.exe"
+    if (-not (Test-Path $exe)) { throw "server.exe missing at $exe" }
+    return $exe
+}
+
+$serverArgs = @("--kernels", "--batch", "1", "--seq-len", "81", "--iters", "2", "--n-l", "2", "--n-sup", "2")
 
 switch ($Mode) {
     "nsys" {
         if (-not $nsys) { throw "nsys.exe not installed. Run install-nsight.ps1" }
+        $exe = Get-ServerExe
         $rep = Join-Path $art "kernels.nsys-rep"
-        & $nsys profile --force-overwrite true --trace=cuda,nvtx,osrt --output $rep -- cargo @server
-        & $nsys stats --report cuda_gpu_kern_sum --report cuda_api_sum $rep
+        # Nsight Compute's bundled nsys 2024.3 needs admin ETW; prefer Systems 2024.5+.
+        # Profile the binary, not cargo. --sample/--cpuctxsw none avoids admin CPU tracing.
+        $ErrorActionPreference = "Continue"
+        & $nsys profile -f true -t cuda -s none --cpuctxsw=none -o $rep $exe @serverArgs
+        if ($LASTEXITCODE -ne 0) { throw "nsys profile failed: $LASTEXITCODE" }
+        & $nsys stats --force-export=true --report cuda_gpu_kern_sum --report cuda_api_sum $rep
     }
     "ncu" {
         if (-not $ncu) { throw "ncu.exe not installed. Run install-nsight.ps1" }
+        $exe = Get-ServerExe
         $rep = Join-Path $art "kernels.ncu-rep"
-        & $ncu --force-overwrite --target-processes all --kernel-name $Kernel --set full -o $rep cargo @server
+        $ErrorActionPreference = "Continue"
+        & $ncu --force-overwrite --kernel-name $Kernel --set full -o $rep $exe @serverArgs
     }
     "sanitizer" {
         if (-not $san) { throw "compute-sanitizer.exe not installed. Run install-nsight.ps1" }

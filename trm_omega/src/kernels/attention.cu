@@ -96,6 +96,26 @@ __global__ void transpose_bhsd_to_bsd(
     dst[dst_idx] = src[idx];
 }
 
+// nsys 2026-09-20 (n_L=2 n_sup=2): naive fused_attention was 68.4% of GPU
+// kernel time — every thread recomputed the full QK dot twice. This version
+// cooperates across D, tiles K/V in shared memory, and uses online softmax.
+#ifndef TRM_ATTN_TILE
+#define TRM_ATTN_TILE 32
+#endif
+
+__device__ __forceinline__ float attn_reduce_sum(float val, float* red, int n) {
+    int t = threadIdx.x;
+    red[t] = (t < n) ? val : 0.0f;
+    __syncthreads();
+    for (int stride = 1; stride < n; stride <<= 1) {
+        if ((t & ((stride << 1) - 1)) == 0 && (t + stride) < n) {
+            red[t] += red[t + stride];
+        }
+        __syncthreads();
+    }
+    return red[0];
+}
+
 __global__ void fused_attention(
     const float* Q,           // [B, H, S, D]
     const float* K,           // [B, H_kv, S, D]
@@ -109,11 +129,11 @@ __global__ void fused_attention(
     int D,
     float scale
 ) {
-    int bh_s = blockIdx.x; // maps to batch, head, and query position
+    int bh_s = blockIdx.x;
     int d_idx = threadIdx.x;
 
     int total_queries = B * H * S;
-    if (bh_s >= total_queries || d_idx >= D) return;
+    if (bh_s >= total_queries) return;
 
     int q_pos = bh_s % S;
     int rem = bh_s / S;
@@ -126,41 +146,47 @@ __global__ void fused_attention(
     const float* k_mat = K + (b * H_kv + kv_h) * S * D;
     const float* v_mat = V + (b * H_kv + kv_h) * S * D;
 
+    extern __shared__ float smem[];
+    float* k_s = smem;
+    float* v_s = k_s + TRM_ATTN_TILE * D;
+    float* red = v_s + TRM_ATTN_TILE * D;
+
+    float q_t = (d_idx < D) ? q_vec[d_idx] : 0.0f;
     float acc = 0.0f;
-    float max_score = -1e20f;
+    float m = -1e20f;
+    float l = 0.0f;
 
-    // Local scores buffer in shared memory per thread/block if needed
-    // Single-pass softmax accumulation
-    float sum_weights = 0.0f;
-    for (int k_pos = 0; k_pos < S; ++k_pos) {
-        float score = 0.0f;
-        for (int i = 0; i < D; ++i) {
-            score += q_vec[i] * k_mat[k_pos * D + i];
+    for (int tile = 0; tile < S; tile += TRM_ATTN_TILE) {
+        int n = S - tile;
+        if (n > TRM_ATTN_TILE) n = TRM_ATTN_TILE;
+        for (int row = 0; row < n; ++row) {
+            if (d_idx < D) {
+                k_s[row * D + d_idx] = k_mat[(tile + row) * D + d_idx];
+                v_s[row * D + d_idx] = v_mat[(tile + row) * D + d_idx];
+            }
         }
-        score *= scale;
-        if (mask) {
-            score += mask[b * S * S + q_pos * S + k_pos];
+        __syncthreads();
+
+        for (int row = 0; row < n; ++row) {
+            float partial = (d_idx < D) ? q_t * k_s[row * D + d_idx] : 0.0f;
+            float score = attn_reduce_sum(partial, red, D) * scale;
+            if (mask) {
+                score += mask[b * S * S + q_pos * S + (tile + row)];
+            }
+            float m_new = fmaxf(m, score);
+            float alpha = expf(m - m_new);
+            float w = expf(score - m_new);
+            float v_t = (d_idx < D) ? v_s[row * D + d_idx] : 0.0f;
+            acc = acc * alpha + w * v_t;
+            l = l * alpha + w;
+            m = m_new;
         }
-        if (score > max_score) {
-            max_score = score;
-        }
+        __syncthreads();
     }
 
-    for (int k_pos = 0; k_pos < S; ++k_pos) {
-        float score = 0.0f;
-        for (int i = 0; i < D; ++i) {
-            score += q_vec[i] * k_mat[k_pos * D + i];
-        }
-        score *= scale;
-        if (mask) {
-            score += mask[b * S * S + q_pos * S + k_pos];
-        }
-        float w = expf(score - max_score);
-        sum_weights += w;
-        acc += w * v_mat[k_pos * D + d_idx];
+    if (d_idx < D) {
+        out[((b * H + h) * S + q_pos) * D + d_idx] = acc / (l + 1e-12f);
     }
-
-    out[((b * H + h) * S + q_pos) * D + d_idx] = acc / (sum_weights + 1e-12f);
 }
 
 __global__ void dense_matmul_bias(

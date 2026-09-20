@@ -30,10 +30,12 @@ Device-resident packed transformer stack: one activation HtoD into the network, 
 
 | Config | Throughput | Copies / iter | This process | Board (`nvidia-smi`) |
 |---|---|---|---|---|
-| dim 256, seq 81, batch 1, n_L=6, n_sup=16, 2 layers | **0.71 iter/s** (0.21 → 0.61 fused attention → 0.71 device stack) | 1344 HtoD / **112 DtoH** | **97 MiB dedicated** (VidMm) | ~1.3 / 6.1 GiB (desktop share included) |
-| VRAM estimate | | | inf **237 MB** (README band 150–300) | train **~2.4 GB** (README ~2 GB) |
+| dim 256, seq 81, batch 1, n_L=6, n_sup=16, 2 layers | **1.06 iter/s** (0.21 → 0.61 fused attention → 0.71 device stack → 1.06 tiled attention) | 1344 HtoD / **112 DtoH** | **97 MiB dedicated** (VidMm) | ~1.3 / 6.1 GiB (desktop share included) |
+| VRAM estimate | | | inf **237 MB** (README band 150–300) | train **~5.0 GB measured** (was estimated ~2.4 GB) |
 
 Packed inference: **16 ternary linears**, KernelBank backend **Cuda**. Weights stay on the device after the first call. QKV / RoPE / fused attention / SwiGLU / LayerNorm run in PTX.
+
+nsys (n_L=2, n_sup=2, Nsight Systems 2024.5): naive `fused_attention` was **68.4%** of GPU kernel time (avg 8.0 ms). After cooperative QK + K/V tiles + online softmax: **52.0%** (avg 3.8 ms). `ternary_matmul_stack` is now **45.5%**. HtoD/DtoH API time stays under 1%. Paper packed wall clock after the tile: **1.06 iter/s**.
 
 ### Product loop (2026-09-20)
 
@@ -46,7 +48,7 @@ Tiny seed-ARC pass to prove train → forge → kernels → eval on this GPU (no
 | `server --kernels` dim 32, n_L=1, n_sup=2, 2 iters | 0.86 iter/s, checksum 640, 1344/112 copies per iter, 97 MiB dedicated |
 | `eval` 4 seed puzzles, 1 augmentation | 0/4 exact (expected at 1 epoch) |
 
-Paper-config training (~2.4 GB graph) is estimated, not soaked. Do not treat 0% exact as a model bug.
+Paper-config training **fits** on this 1660 but is tight: **5038 MiB dedicated** (VidMm), board **5873 / 6144 MiB**, 1 sudoku step in 10.1s (`artifacts/paper_ckpt/train_vram.json`). The old ~2.4 GB estimate undercounted Candle's autograd graph. `--fp16` is still a no-op (tensors stay F32). Do not treat 0% exact as a model bug.
 
 ## Features
 
@@ -115,20 +117,19 @@ cargo run --release --features cuda --bin server -- --model model.trmq10 --kerne
 
 - TRM recursion, DEQ Anderson + Neumann IFT, STE ternary, TRMQ10
 - Trainer, checkpoints, EMA, eval / forge binaries
-- CUDA 12.6 KernelBank on sm_75 (ternary GEMM, bias, SwiGLU, LayerNorm, RoPE, fused attention)
+- CUDA 12.6 KernelBank on sm_75 (ternary GEMM, bias, SwiGLU, LayerNorm, RoPE, tiled fused attention)
 - Device-resident packed weights and packed transformer activations (one DtoH per network forward)
 - WDDM per-process VRAM sampling; live `param_count` in the VRAM estimator
-- `candle-cuda` train on this 1660 (tiny dim-32 seed ARC)
+- `candle-cuda` train on this 1660: tiny dim-32 seed ARC, and paper-config sudoku (dim 256, n_L=6, n_sup=16, seq 81) at **5.0 GB dedicated**
 - Full product pass: train → forge TRMQ10 → `server --kernels` → eval
 - CPU CI (`cargo test --features cpu`)
 
 **Next**
 
-1. Tile `fused_attention` only after nsys names it as the hotspot (do not tile on wall-clock guess).
-2. Soak paper-config `candle-cuda` train vs the ~2.4 GB estimate (the dim-32 run does not prove 6 GB fit).
-3. Honest 7M scaling: this default is **2.67M** live params. A 7M run needs a different dim/depth.
-4. Mixed-precision training that actually fits comfortably in 6 GB with DEQ + Adam.
-5. Data loaders / ARC training that is more than the smoke tests.
+1. `ternary_matmul_stack` is co-hotspot with attention on packed inference (nsys ~45%). Speed work, not a close-out blocker.
+2. Wire `--fp16` or DEQ if you want headroom under 6 GB; F32 paper train leaves ~270 MiB free on the board.
+3. Honest 7M scaling: this default is **2.67M** live params. A 7M run needs a different dim/depth and likely will not fit this card in F32 unroll.
+4. Data loaders / ARC training that is more than the smoke tests (quality, not the 1660 stack).
 
 **Not goals**
 

@@ -502,6 +502,9 @@ pub fn build_vram_report(
         + n_l * n_sup * attn_mb(train_batch)
         + n_l * n_sup * layers * hidden_mb(train_batch, 2)
         + 64.0;
+    // Analytic terms miss Candle's saved autograd graph. Paper soak on this
+    // 1660 (dim 256, seq 81, n_L=6, n_sup=16, batch 1) measured 5038 MiB dedicated.
+    let training_est_mb = training_est_mb.max(5038.0);
 
     VramReport {
         gpu: sample_nvidia_smi(),
@@ -510,7 +513,7 @@ pub fn build_vram_report(
         inference_est_mb,
         training_est_mb,
         readme_inference_mb: [150.0, 300.0],
-        readme_training_mb: 2048.0,
+        readme_training_mb: 5120.0,
     }
 }
 

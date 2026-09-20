@@ -22,6 +22,7 @@ use crate::data::{
     pad_tokens, tokenize_grid, TokenizedExample,
 };
 use crate::deq::DeqWrapper;
+use crate::memory::{sample_nvidia_smi, sample_this_process_vram};
 use crate::network::NetworkConfig;
 use crate::recursion::{TrmConfig, TrmModel};
 use crate::train::checkpoint::{load_checkpoint, save_checkpoint, TrainingMeta};
@@ -253,6 +254,18 @@ pub struct Trainer {
     pub metrics: TrainMetrics,
 }
 
+fn split_holdout(all: Vec<TokenizedExample>) -> (Vec<TokenizedExample>, Vec<TokenizedExample>) {
+    if all.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    if all.len() == 1 {
+        return (all.clone(), all);
+    }
+    let split = ((all.len() * 9) / 10).max(1).min(all.len() - 1);
+    let (train, val) = all.split_at(split);
+    (train.to_vec(), val.to_vec())
+}
+
 impl Trainer {
     pub fn new(device: Device, net_cfg: NetworkConfig, trm_cfg: TrmConfig, config: TrainConfig) -> Result<Self> {
         let model = TrmModel::new(device, net_cfg, trm_cfg)?;
@@ -308,9 +321,9 @@ impl Trainer {
             TaskType::Arc => {
                 let tasks = load_arc_tasks(&self.config.data_dir)?;
                 let n = tasks.len();
-                let split = (n * 9) / 10;
-                let train_tasks = &tasks[..split];
-                let val_tasks = &tasks[split..];
+                let split = if n <= 1 { 0 } else { ((n * 9) / 10).max(1).min(n - 1) };
+                let train_tasks = if n <= 1 { &tasks[..] } else { &tasks[..split] };
+                let val_tasks = if n <= 1 { &tasks[..] } else { &tasks[split..] };
                 let train = arc_training_examples(train_tasks);
                 let val = arc_training_examples(val_tasks);
                 log::info!("ARC: {} train, {} val examples", train.len(), val.len());
@@ -318,27 +331,21 @@ impl Trainer {
             }
             TaskType::Sudoku => {
                 let path = self.config.data_dir.join("sudoku.csv");
-                let all = load_sudoku_txt(&path)?;
-                let split = (all.len() * 9) / 10;
-                let (train, val) = all.split_at(split);
-                Ok((train.to_vec(), val.to_vec()))
+                Ok(split_holdout(load_sudoku_txt(&path)?))
             }
-            TaskType::Maze => {
-                let all = load_maze_dir(&self.config.data_dir)?;
-                let split = (all.len() * 9) / 10;
-                let (train, val) = all.split_at(split);
-                Ok((train.to_vec(), val.to_vec()))
-            }
+            TaskType::Maze => Ok(split_holdout(load_maze_dir(&self.config.data_dir)?)),
         }
     }
 
     pub fn train(&mut self) -> Result<()> {
         log::info!("=======================================================");
         log::info!(" TRM-Omega v10.2 Training Session");
+        log::info!(" device      : {:?}", self.model.device);
         log::info!(" params      : {:.2}M live / ~{:.2}M layer est", self.model.param_count() as f64 / 1e6, self.model.net_cfg.param_count_estimate() as f64 / 1e6);
-        log::info!(" batch       : {} (effective)", self.current_batch_size);
+        log::info!(" batch       : {} (effective)  micro {}", self.current_batch_size, self.config.micro_batch_size);
         log::info!(" task        : {:?}", self.config.task_type);
         log::info!(" DEQ mode    : {}", self.model.trm_cfg.use_deq);
+        log::info!(" fp16 flag   : {} (unused; tensors stay F32)", self.config.use_fp16);
         log::info!("=======================================================");
 
         let (train_data, val_data) = self.load_data()?;
@@ -460,7 +467,52 @@ impl Trainer {
             self.optimizer.accumulate(&self.model.varmap, &grads)?;
         }
 
+        if self.meta.global_step == 0 {
+            self.record_train_vram(max_seq, x.dims2()?.0)?;
+        }
+
         Ok(loss_val)
+    }
+
+    fn record_train_vram(&self, seq: usize, batch: usize) -> Result<()> {
+        let gpu = sample_nvidia_smi();
+        let process = sample_this_process_vram();
+        if let Some(ref g) = gpu {
+            log::info!(
+                "VRAM nvidia-smi: {} used {:.0}/{:.0} MiB",
+                g.name, g.used_mb, g.total_mb
+            );
+        }
+        if let Some(ref p) = process {
+            log::info!(
+                "VRAM this process: {:.1} MiB ({}) dedicated={:?} cuda_free={:?}",
+                p.used_mb, p.source, p.dedicated_mb, p.cuda_free_mb
+            );
+        }
+        let payload = serde_json::json!({
+            "seq": seq,
+            "batch": batch,
+            "dim": self.model.net_cfg.dim,
+            "n_l": self.model.trm_cfg.n_l_cycles,
+            "n_sup": self.model.trm_cfg.n_sup,
+            "live_params": self.model.param_count(),
+            "device": format!("{:?}", self.model.device),
+            "gpu": gpu,
+            "process": process,
+            "readme_training_mb": 2048.0,
+            "estimate_mb": crate::memory::build_vram_report(
+                1,
+                seq,
+                self.model.net_cfg.dim,
+                batch,
+                Some(self.model.param_count()),
+            ).training_est_mb,
+        });
+        std::fs::create_dir_all(&self.config.checkpoint_dir)?;
+        let path = self.config.checkpoint_dir.join("train_vram.json");
+        std::fs::write(&path, serde_json::to_vec_pretty(&payload)?)?;
+        log::info!(" wrote {}", path.display());
+        Ok(())
     }
 
     pub fn deq_backward(

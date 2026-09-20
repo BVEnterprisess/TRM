@@ -267,6 +267,43 @@ fn cuda_kernelbank_matches_cpu_ref() -> anyhow::Result<()> {
         )?;
         let mha_err = max_abs_diff(&cpu_mha, &gpu_mha);
         assert!(mha_err < 5e-3, "CUDA vs CPU fused MHA max abs {mha_err}");
+
+        // Paper head_dim is 32; the small case above is 8.
+        let dh32 = 32usize;
+        let heads32 = 4usize;
+        let kv32 = 4usize;
+        let seq32 = 8usize;
+        let dim32 = heads32 * dh32;
+        let qw32: Vec<f32> = (0..(dim32 * dim32)).map(|i| ((i % 9) as f32 / 4.0) - 1.0).collect();
+        let kw32: Vec<f32> = (0..(dim32 * dim32)).map(|i| ((i % 7) as f32 / 3.0) - 0.6).collect();
+        let vw32: Vec<f32> = (0..(dim32 * dim32)).map(|i| ((i % 5) as f32 / 4.0) - 0.4).collect();
+        let ow32: Vec<f32> = (0..(dim32 * dim32)).map(|i| ((i % 11) as f32 / 5.0) - 0.8).collect();
+        let q32 = quantize_rowwise_ternary(&qw32, dim32, dim32);
+        let k32 = quantize_rowwise_ternary(&kw32, dim32, dim32);
+        let v32 = quantize_rowwise_ternary(&vw32, dim32, dim32);
+        let o32 = quantize_rowwise_ternary(&ow32, dim32, dim32);
+        let half32 = dh32 / 2;
+        let mut cos32 = vec![0f32; seq32 * half32];
+        let mut sin32 = vec![0f32; seq32 * half32];
+        for pos in 0..seq32 {
+            for i in 0..half32 {
+                let theta = (pos as f32) / 10_000f32.powf(2.0 * i as f32 / dh32 as f32);
+                cos32[pos * half32 + i] = theta.cos();
+                sin32[pos * half32 + i] = theta.sin();
+            }
+        }
+        let xs32: Vec<f32> = (0..(b * seq32 * dim32)).map(|i| ((i % 6) as f32 / 5.0) - 0.5).collect();
+        let z = vec![0f32; dim32];
+        let cpu32 = kernel_ref::packed_mha(
+            &xs32, b, seq32, &q32, Some(&z), &k32, Some(&z), &v32, Some(&z),
+            &o32, Some(&z), heads32, kv32, dh32, &cos32, &sin32, None,
+        );
+        let gpu32 = bank.packed_mha_host(
+            &xs32, b, seq32, &q32, Some(&z), &k32, Some(&z), &v32, Some(&z),
+            &o32, Some(&z), heads32, kv32, dh32, &cos32, &sin32, None,
+        )?;
+        let err32 = max_abs_diff(&cpu32, &gpu32);
+        assert!(err32 < 5e-3, "CUDA vs CPU fused MHA d=32 max abs {err32}");
     }
 
     bank.reset_copy_stats();

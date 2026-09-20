@@ -1,7 +1,7 @@
 {
   "avg_steps_used": 16.0,
   "batch": 1,
-  "checksum": 243,
+  "checksum": 405,
   "copy_calls_per_iter": {
     "dtoh": 112.0,
     "dtoh_mb": 26.578125,
@@ -19,23 +19,23 @@
   "dim": 256,
   "heads": 8,
   "inference_est_mb": 237.28736901283264,
-  "iter_per_s": 0.7140828764943501,
+  "iter_per_s": 1.064176352112543,
   "iters": 4,
   "kernel_backend": "Cuda",
   "n_l": 6,
   "n_sup": 16,
   "nvidia_smi": {
-    "free_mb": 4594.0,
+    "free_mb": 4813.0,
     "name": "NVIDIA GeForce GTX 1660",
     "total_mb": 6144.0,
-    "used_mb": 1373.0
+    "used_mb": 1154.0
   },
   "packed_linears": 16,
   "process": {
     "cuda_free_mb": 5102.0,
     "cuda_total_mb": 6143.5625,
     "dedicated_mb": 97.30078125,
-    "pid": 12700,
+    "pid": 20792,
     "shared_mb": 66.0,
     "source": "wddm-vidmm",
     "used_mb": 97.30078125
@@ -44,9 +44,9 @@
     150.0,
     300.0
   ],
-  "readme_training_mb": 2048.0,
-  "secs": 5.6015907,
+  "readme_training_mb": 5120.0,
+  "secs": 3.7587755,
   "seq_len": 81,
-  "training_est_mb": 2417.772476196289,
+  "training_est_mb": 5038.0,
   "variant": "Transformer"
 }

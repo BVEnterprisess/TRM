@@ -605,10 +605,13 @@ impl KernelBank {
         let mut ctx = self.zeros::<f32>(b * n_heads * s * head_dim)?;
         let scale = 1.0f32 / (head_dim as f32).sqrt();
         let queries = b * n_heads * s;
+        // TRM_ATTN_TILE=32 K/V tiles + reduction scratch (see attention.cu).
+        let tile = 32usize;
+        let smem = ((2 * tile * head_dim + head_dim) * 4) as u32;
         let cfg = LaunchConfig {
             grid_dim: (queries as u32, 1, 1),
             block_dim: (head_dim.max(1) as u32, 1, 1),
-            shared_mem_bytes: 0,
+            shared_mem_bytes: smem,
         };
         let f = self.func("fused_attention")?;
         unsafe {
