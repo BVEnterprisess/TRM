@@ -11,3 +11,12 @@
 **/scratch/
 **/node_modules/
 **/dist/
+.cache/
+**/*.nsys-rep
+**/*.ncu-rep
+**/*.qdrep
+**/*.sqlite
+
+
+# AutoClaw KDream data
+.autoclaw/

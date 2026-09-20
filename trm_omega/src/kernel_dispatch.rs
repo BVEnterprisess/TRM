@@ -27,6 +27,45 @@ pub fn active_backend() -> KernelBackend {
     KernelBackend::CpuRef
 }
 
+/// KernelBank HtoD/DtoH counters. `None` when CUDA is off or the bank never started.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct GpuCopyStats {
+    pub htod_calls: u64,
+    pub dtoh_calls: u64,
+    pub htod_bytes: u64,
+    pub dtoh_bytes: u64,
+    pub htod_mb: f64,
+    pub dtoh_mb: f64,
+}
+
+pub fn reset_copy_stats() {
+    #[cfg(feature = "cuda")]
+    if let Some(bank) = crate::custom_kernels::global_bank_if_ready() {
+        bank.reset_copy_stats();
+    }
+}
+
+pub fn snapshot_copy_stats() -> Option<GpuCopyStats> {
+    #[cfg(feature = "cuda")]
+    {
+        return crate::custom_kernels::global_bank_if_ready().map(|bank| {
+            let s = bank.snapshot_copy_stats();
+            GpuCopyStats {
+                htod_calls: s.htod_calls,
+                dtoh_calls: s.dtoh_calls,
+                htod_bytes: s.htod_bytes,
+                dtoh_bytes: s.dtoh_bytes,
+                htod_mb: s.htod_mb,
+                dtoh_mb: s.dtoh_mb,
+            }
+        });
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        None
+    }
+}
+
 pub fn swiglu_f32(gate: &[f32], up: &[f32]) -> Result<Vec<f32>> {
     #[cfg(feature = "cuda")]
     {
@@ -308,6 +347,118 @@ pub fn packed_mha_f32(
         xs, b, s, q, q_bias, k, k_bias, v, v_bias, o, o_bias,
         n_heads, n_kv, head_dim, rope_cos, rope_sin, mask,
     ))
+}
+
+/// Host-owned LN/bias plus pack refs for one transformer block.
+pub struct PackedLayerBufs<'a> {
+    pub ln_attn_g: Vec<f32>,
+    pub ln_attn_b: Vec<f32>,
+    pub ln_ffn_g: Vec<f32>,
+    pub ln_ffn_b: Vec<f32>,
+    pub q: &'a TernaryPacked,
+    pub q_bias: Option<Vec<f32>>,
+    pub k: &'a TernaryPacked,
+    pub k_bias: Option<Vec<f32>>,
+    pub v: &'a TernaryPacked,
+    pub v_bias: Option<Vec<f32>>,
+    pub o: &'a TernaryPacked,
+    pub o_bias: Option<Vec<f32>>,
+    pub gate: &'a TernaryPacked,
+    pub gate_bias: Option<Vec<f32>>,
+    pub value: &'a TernaryPacked,
+    pub value_bias: Option<Vec<f32>>,
+    pub down: &'a TernaryPacked,
+    pub down_bias: Option<Vec<f32>>,
+    pub n_heads: usize,
+    pub n_kv: usize,
+    pub head_dim: usize,
+}
+
+/// Packed transformer stack: activations stay on device between layers.
+pub fn packed_transformer_stack(
+    xs: &Tensor,
+    layers: &[PackedLayerBufs<'_>],
+    rope_cos: &Tensor,
+    rope_sin: &Tensor,
+    mask: Option<&Tensor>,
+) -> candle_core::Result<Tensor> {
+    let (b, s, d) = xs.dims3()?;
+    if layers.is_empty() {
+        candle_core::bail!("packed transformer stack is empty");
+    }
+    let input = xs.flatten_all()?.to_vec1::<f32>()?;
+    let half = layers[0].head_dim / 2;
+    let cos = rope_cos.narrow(0, 0, s)?.flatten_all()?.to_vec1::<f32>()?;
+    let sin = rope_sin.narrow(0, 0, s)?.flatten_all()?.to_vec1::<f32>()?;
+    if cos.len() < s * half || sin.len() < s * half {
+        candle_core::bail!("rope cache too short for seq {s}");
+    }
+    let mask_v = match mask {
+        Some(m) => {
+            let flat = m.flatten_all()?.to_vec1::<f32>()?;
+            if flat.len() == b * s * s {
+                Some(flat)
+            } else if flat.len() == s * s {
+                let mut expanded = Vec::with_capacity(b * s * s);
+                for _ in 0..b {
+                    expanded.extend_from_slice(&flat);
+                }
+                Some(expanded)
+            } else {
+                candle_core::bail!("attn mask len {} != B*S*S {}", flat.len(), b * s * s)
+            }
+        }
+        None => None,
+    };
+
+    #[cfg(feature = "cuda")]
+    {
+        if let Some(bank) = crate::custom_kernels::global_bank() {
+            if bank.has("fused_attention") && bank.has("layer_norm") && bank.has("ewise_add_inplace") {
+                let cuda_layers: Vec<crate::custom_kernels::PackedTransformerLayer<'_>> = layers
+                    .iter()
+                    .map(|l| crate::custom_kernels::PackedTransformerLayer {
+                        ln_attn_gamma: &l.ln_attn_g,
+                        ln_attn_beta: &l.ln_attn_b,
+                        ln_ffn_gamma: &l.ln_ffn_g,
+                        ln_ffn_beta: &l.ln_ffn_b,
+                        q: l.q,
+                        q_bias: l.q_bias.as_deref(),
+                        k: l.k,
+                        k_bias: l.k_bias.as_deref(),
+                        v: l.v,
+                        v_bias: l.v_bias.as_deref(),
+                        o: l.o,
+                        o_bias: l.o_bias.as_deref(),
+                        gate: l.gate,
+                        gate_bias: l.gate_bias.as_deref(),
+                        value: l.value,
+                        value_bias: l.value_bias.as_deref(),
+                        down: l.down,
+                        down_bias: l.down_bias.as_deref(),
+                        n_heads: l.n_heads,
+                        n_kv: l.n_kv,
+                        head_dim: l.head_dim,
+                    })
+                    .collect();
+                if let Ok(out) = bank.packed_transformer_stack_host(
+                    &input,
+                    b,
+                    s,
+                    d,
+                    &cuda_layers,
+                    &cos,
+                    &sin,
+                    mask_v.as_deref(),
+                    1e-5,
+                ) {
+                    return Tensor::from_vec(out, (b, s, d), xs.device());
+                }
+            }
+        }
+    }
+    let _ = (input, cos, sin, mask_v, b, s, d);
+    candle_core::bail!("packed transformer stack unavailable")
 }
 
 pub fn linear_maybe_ternary(

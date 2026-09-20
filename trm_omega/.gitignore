@@ -12,3 +12,7 @@ node_modules/
 dist/
 build/
 coverage/
+*.nsys-rep
+*.ncu-rep
+*.qdrep
+

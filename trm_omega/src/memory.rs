@@ -465,7 +465,13 @@ mod wddm {
 /// Inference is dominated by the CUDA context on a WDDM GTX 1660 plus
 /// `[x|y|z]` attention maps. Training adds Adam states and the unrolled
 /// L×H autograd graph (attention scores retained per step).
-pub fn build_vram_report(batch: usize, seq: usize, dim: usize, train_batch: usize) -> VramReport {
+pub fn build_vram_report(
+    batch: usize,
+    seq: usize,
+    dim: usize,
+    train_batch: usize,
+    param_count: Option<usize>,
+) -> VramReport {
     let budget = MemoryBudget::default();
     let concat = seq.saturating_mul(3).max(1);
     let heads = 8usize;
@@ -474,6 +480,7 @@ pub fn build_vram_report(batch: usize, seq: usize, dim: usize, train_batch: usiz
     let layers = 2.0f64;
     let cuda_context_mb = 200.0;
     let bytes = 4.0f64;
+    let n_params = param_count.unwrap_or(2_670_000) as f64;
 
     let attn_mb = |b: usize| {
         (b * heads * concat * concat) as f64 * bytes / 1024.0 / 1024.0
@@ -481,8 +488,8 @@ pub fn build_vram_report(batch: usize, seq: usize, dim: usize, train_batch: usiz
     let hidden_mb = |b: usize, bufs: usize| {
         budget.estimate_activation_mb(b, concat, dim, bufs)
     };
-    let weight_fp32_mb = (1.58e6 * 4.0) / (1024.0 * 1024.0);
-    let weight_ternary_mb = (1.58e6 * 2.0 / 8.0) / (1024.0 * 1024.0);
+    let weight_fp32_mb = (n_params * 4.0) / (1024.0 * 1024.0);
+    let weight_ternary_mb = (n_params * 2.0 / 8.0) / (1024.0 * 1024.0);
 
     let inference_est_mb = cuda_context_mb
         + weight_ternary_mb

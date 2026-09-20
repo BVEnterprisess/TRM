@@ -1,0 +1,32 @@
+{
+  "date": "2026-09-20",
+  "gpu": "NVIDIA GeForce GTX 1660",
+  "note": "Smoke product pass, not a quality run. 0% exact is expected at 1 epoch on 4 seed puzzles.",
+  "train": {
+    "features": "candle-cuda",
+    "dim": 32,
+    "heads": 4,
+    "layers": 2,
+    "epochs": 1,
+    "live_params": 160000,
+    "loss": 29.0882,
+    "checkpoint": "artifacts/loop_ckpt/final.safetensors"
+  },
+  "forge": {
+    "output": "artifacts/loop.trmq10",
+    "ternary_tensors": 19,
+    "fp32_tensors": 28
+  },
+  "kernels": {
+    "iter_per_s": 0.8593167443668027,
+    "checksum": 640,
+    "copy_calls_per_iter": { "htod": 1344.0, "dtoh": 112.0 },
+    "dedicated_mi_b": 97.3
+  },
+  "eval": {
+    "test_inputs": 4,
+    "exact_matches": 0,
+    "exact_accuracy": 0.0,
+    "n_augmentations": 1
+  }
+}

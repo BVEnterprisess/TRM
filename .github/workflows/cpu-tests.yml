@@ -1,0 +1,19 @@
+name: cpu-tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: trm_omega
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo test (cpu)
+        run: cargo test --features cpu
+        env:
+          CARGO_TERM_COLOR: always

@@ -47,7 +47,7 @@ struct Args {
     #[arg(long, default_value_t = 4)]
     micro_batch: usize,
 
-    #[arg(long, default_value = "true")]
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     fp16: bool,
 
     #[arg(long, default_value_t = 1e-3)]

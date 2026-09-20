@@ -2,7 +2,7 @@
 
 Recursive reasoning engine in Rust + Candle. 2-bit ternary weights, optional CUDA kernels on consumer NVIDIA cards.
 
-Crate: `trm_omega` 10.2. Source lives in this directory (the folder name is historical; the package is `trm_omega`).
+Crate: `trm_omega` 10.2.
 
 ## What it is
 
@@ -24,14 +24,29 @@ Default paper-ish shape on this repo: **dim 256, 8 heads, 2 layers, n_L=6, n_sup
 
 Per-process VRAM cannot be read from `nvidia-smi` under WDDM. The binaries sample **VidMm dedicated usage** (same source as Task Manager) and `cuMemGetInfo`.
 
-### Measured (2026-09-20, `--features cuda --release --bin server -- --kernels`)
+### Packed inference (2026-09-20, `--features cuda --release --bin server -- --kernels`)
 
-| Config | Throughput | This process | Board (`nvidia-smi`) |
-|---|---|---|---|
-| dim 256, seq 81, batch 1, n_L=6, n_sup=16, 2 layers, packed MHA | **0.61 iter/s** (was 0.21 before fused attention) | **97 MiB dedicated** (VidMm) | ~1.3 / 6.1 GiB (desktop share included) |
-| VRAM estimate (weights + context + `[x\|y\|z]` maps) | | inf **237 MB** (README band 150–300) | train **~2.4 GB** (README ~2 GB) |
+Device-resident packed transformer stack: one activation HtoD into the network, LayerNorm / MHA / SwiGLU / residual on device, one DtoH out. Remaining HtoD is LN / RoPE / mask uploads, not per-layer activation bounce.
 
-Packed inference: **16 ternary linears**, KernelBank backend **Cuda**. Weights stay on the device after the first call. QKV / RoPE / fused attention / SwiGLU / LayerNorm run in PTX. Activations still cross the host between Candle tensors and KernelBank; that copy is the remaining speed limit, not GEMM.
+| Config | Throughput | Copies / iter | This process | Board (`nvidia-smi`) |
+|---|---|---|---|---|
+| dim 256, seq 81, batch 1, n_L=6, n_sup=16, 2 layers | **0.71 iter/s** (0.21 → 0.61 fused attention → 0.71 device stack) | 1344 HtoD / **112 DtoH** | **97 MiB dedicated** (VidMm) | ~1.3 / 6.1 GiB (desktop share included) |
+| VRAM estimate | | | inf **237 MB** (README band 150–300) | train **~2.4 GB** (README ~2 GB) |
+
+Packed inference: **16 ternary linears**, KernelBank backend **Cuda**. Weights stay on the device after the first call. QKV / RoPE / fused attention / SwiGLU / LayerNorm run in PTX.
+
+### Product loop (2026-09-20)
+
+Tiny seed-ARC pass to prove train → forge → kernels → eval on this GPU (not a quality run):
+
+| Stage | Result |
+|---|---|
+| `train` `--features candle-cuda` dim 32, 1 epoch, 5 train / 1 val | Device::new_cuda, 0.16M live params, loss 29.0882, `artifacts/loop_ckpt/final.safetensors` |
+| `forge` | `artifacts/loop.trmq10` (19 ternary, 28 fp32) |
+| `server --kernels` dim 32, n_L=1, n_sup=2, 2 iters | 0.86 iter/s, checksum 640, 1344/112 copies per iter, 97 MiB dedicated |
+| `eval` 4 seed puzzles, 1 augmentation | 0/4 exact (expected at 1 epoch) |
+
+Paper-config training (~2.4 GB graph) is estimated, not soaked. Do not treat 0% exact as a model bug.
 
 ## Features
 
@@ -39,7 +54,7 @@ Packed inference: **16 ternary linears**, KernelBank backend **Cuda**. Weights s
 |---|---|
 | `cpu` (default) | Candle on CPU. Packed path uses `kernel_ref` (CPU clones of the `.cu` loops). |
 | `cuda` | Loads nvcc PTX into `cudarc` KernelBank. Inference / quantized GEMM only. Training autograd stays on Candle. |
-| `candle-cuda` | `cuda` plus Candle tensors on GPU (`Device::new_cuda(0)`). Needs the CUDA toolkit at **link** time. Training GEMMs can live on the 1660; packed kernels still round-trip through host buffers today. |
+| `candle-cuda` | `cuda` plus Candle tensors on GPU (`Device::new_cuda(0)`). Needs the CUDA toolkit at **link** time. Training GEMMs can live on the 1660. Packed inference still uses KernelBank, not Candle CUDA storage pointers. |
 
 ```bash
 cargo test --features cpu
@@ -90,6 +105,8 @@ cargo run --release --bin forge -- --input checkpoints/best.safetensors --output
 cargo run --release --features cuda --bin server -- --model model.trmq10 --kernels --batch 1 --seq-len 81
 ```
 
+`--fp16` defaults on; disable with `--fp16=false` (not `--fp16 false`).
+
 `server` writes `artifacts/kernels_bench.json` and `artifacts/vram_probe.json`.
 
 ## Implementation status
@@ -99,16 +116,19 @@ cargo run --release --features cuda --bin server -- --model model.trmq10 --kerne
 - TRM recursion, DEQ Anderson + Neumann IFT, STE ternary, TRMQ10
 - Trainer, checkpoints, EMA, eval / forge binaries
 - CUDA 12.6 KernelBank on sm_75 (ternary GEMM, bias, SwiGLU, LayerNorm, RoPE, fused attention)
-- Device-resident packed weights; fused packed FFN and packed MHA
-- WDDM per-process VRAM sampling
+- Device-resident packed weights and packed transformer activations (one DtoH per network forward)
+- WDDM per-process VRAM sampling; live `param_count` in the VRAM estimator
+- `candle-cuda` train on this 1660 (tiny dim-32 seed ARC)
+- Full product pass: train → forge TRMQ10 → `server --kernels` → eval
 - CPU CI (`cargo test --features cpu`)
 
 **Next**
 
-1. End-to-end device activations (no host bounce per layer). `candle-cuda` is the training half; KernelBank needs device pointers from Candle CUDA storage for inference.
-2. Honest scaling: this default is **2.67M** live params, not 7M. A 7M run needs a different dim/depth.
-3. Mixed-precision training that actually fits comfortably in 6 GB with DEQ + Adam.
-4. Data loaders / ARC training that is more than the smoke tests.
+1. Tile `fused_attention` only after nsys names it as the hotspot (do not tile on wall-clock guess).
+2. Soak paper-config `candle-cuda` train vs the ~2.4 GB estimate (the dim-32 run does not prove 6 GB fit).
+3. Honest 7M scaling: this default is **2.67M** live params. A 7M run needs a different dim/depth.
+4. Mixed-precision training that actually fits comfortably in 6 GB with DEQ + Adam.
+5. Data loaders / ARC training that is more than the smoke tests.
 
 **Not goals**
 

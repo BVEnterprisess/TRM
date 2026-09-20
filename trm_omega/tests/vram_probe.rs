@@ -28,7 +28,7 @@ fn vram_and_throughput_harness() -> anyhow::Result<()> {
     // README numbers are for dim=256 / seq=81 on a GTX 1660. Estimates do not
     // require running that graph; a tiny packed forward still exercises the
     // kernel dispatch used by the server `--kernels` path.
-    let mut report = build_vram_report(1, 81, 256, 8);
+    let mut report = build_vram_report(1, 81, 256, 8, Some(2_670_000));
     let budget = MemoryBudget::default();
     assert!(
         report.inference_est_mb < 450.0,

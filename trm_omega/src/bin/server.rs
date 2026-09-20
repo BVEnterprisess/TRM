@@ -102,6 +102,7 @@ fn main() -> Result<()> {
     // warmup (also uploads packed weights into the device cache)
     let _ = model.forward_trace(&x_tokens, args.seq_len, Some(&puzzle_ids), None, None, None)?;
     let vram_after_warmup = trm_omega::memory::sample_nvidia_smi();
+    trm_omega::kernel_dispatch::reset_copy_stats();
 
     let start = Instant::now();
     let mut steps_sum = 0usize;
@@ -110,6 +111,7 @@ fn main() -> Result<()> {
         steps_sum += trace.steps_used;
     }
     let secs = start.elapsed().as_secs_f64();
+    let copy_stats = trm_omega::kernel_dispatch::snapshot_copy_stats();
     let vram_after = trm_omega::memory::sample_nvidia_smi();
 
     let trace = model.forward_trace(&x_tokens, args.seq_len, Some(&puzzle_ids), None, None, None)?;
@@ -131,7 +133,25 @@ fn main() -> Result<()> {
     eprintln!(" params live    : {:.2}M", model.param_count() as f64 / 1e6);
     eprintln!(" packed linears : {}", model.packed_linear_count());
     eprintln!(" kernel backend : {:?}", trm_omega::kernel_dispatch::active_backend());
-    let report = trm_omega::memory::build_vram_report(args.batch, args.seq_len, args.dim, 8);
+    if let Some(cs) = copy_stats.as_ref() {
+        let iters = args.iters.max(1) as f64;
+        eprintln!(
+            " kernel copies  : {} HtoD / {} DtoH  ({:.2} / {:.2} MiB)  avg {:.0}/{:.0} calls per iter",
+            cs.htod_calls,
+            cs.dtoh_calls,
+            cs.htod_mb,
+            cs.dtoh_mb,
+            cs.htod_calls as f64 / iters,
+            cs.dtoh_calls as f64 / iters,
+        );
+    }
+    let report = trm_omega::memory::build_vram_report(
+        args.batch,
+        args.seq_len,
+        args.dim,
+        8,
+        Some(model.param_count()),
+    );
     eprintln!(
         " VRAM est inf   : {:.1} MB (README {:.0}–{:.0})",
         report.inference_est_mb, report.readme_inference_mb[0], report.readme_inference_mb[1]
@@ -191,6 +211,16 @@ fn main() -> Result<()> {
         "nvidia_smi": gpu,
         "process": report.process,
         "checksum": checksum,
+        "copy_stats": copy_stats,
+        "copy_calls_per_iter": copy_stats.as_ref().map(|cs| {
+            let iters = args.iters.max(1) as f64;
+            serde_json::json!({
+                "htod": cs.htod_calls as f64 / iters,
+                "dtoh": cs.dtoh_calls as f64 / iters,
+                "htod_mb": cs.htod_mb / iters,
+                "dtoh_mb": cs.dtoh_mb / iters,
+            })
+        }),
     });
     let _ = std::fs::write(art.join("kernels_bench.json"), serde_json::to_vec_pretty(&bench)?);
 

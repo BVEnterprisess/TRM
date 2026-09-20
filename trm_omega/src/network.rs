@@ -335,7 +335,62 @@ pub struct TransformerBlock {
     use_inplace: bool,
 }
 
+fn ln_vecs(ln: &CLayerNorm) -> Result<(Vec<f32>, Vec<f32>)> {
+    let g = ln.weight().flatten_all()?.to_vec1::<f32>()?;
+    let b = match ln.bias() {
+        Some(bias) => bias.flatten_all()?.to_vec1::<f32>()?,
+        None => vec![0f32; g.len()],
+    };
+    Ok((g, b))
+}
+
+fn linear_bias_vec(lin: &MaybeTernaryLinear) -> Result<Option<Vec<f32>>> {
+    match lin.inner().bias() {
+        Some(b) => Ok(Some(b.flatten_all()?.to_vec1::<f32>()?)),
+        None => Ok(None),
+    }
+}
+
 impl TransformerBlock {
+    pub fn is_packed(&self) -> bool {
+        self.attn.is_packed() && self.ffn.is_packed()
+    }
+
+    pub(crate) fn packed_layer_bufs(&self) -> Result<crate::kernel_dispatch::PackedLayerBufs<'_>> {
+        let q = self.attn.q_proj.packed().ok_or_else(|| candle_core::Error::Msg("q not packed".into()))?;
+        let k = self.attn.k_proj.packed().ok_or_else(|| candle_core::Error::Msg("k not packed".into()))?;
+        let v = self.attn.v_proj.packed().ok_or_else(|| candle_core::Error::Msg("v not packed".into()))?;
+        let o = self.attn.o_proj.packed().ok_or_else(|| candle_core::Error::Msg("o not packed".into()))?;
+        let gate = self.ffn.gate.packed().ok_or_else(|| candle_core::Error::Msg("gate not packed".into()))?;
+        let value = self.ffn.value.packed().ok_or_else(|| candle_core::Error::Msg("value not packed".into()))?;
+        let down = self.ffn.down.packed().ok_or_else(|| candle_core::Error::Msg("down not packed".into()))?;
+        let (ln_attn_g, ln_attn_b) = ln_vecs(&self.ln_attn)?;
+        let (ln_ffn_g, ln_ffn_b) = ln_vecs(&self.ln_ffn)?;
+        Ok(crate::kernel_dispatch::PackedLayerBufs {
+            ln_attn_g,
+            ln_attn_b,
+            ln_ffn_g,
+            ln_ffn_b,
+            q,
+            q_bias: linear_bias_vec(&self.attn.q_proj)?,
+            k,
+            k_bias: linear_bias_vec(&self.attn.k_proj)?,
+            v,
+            v_bias: linear_bias_vec(&self.attn.v_proj)?,
+            o,
+            o_bias: linear_bias_vec(&self.attn.o_proj)?,
+            gate,
+            gate_bias: linear_bias_vec(&self.ffn.gate)?,
+            value,
+            value_bias: linear_bias_vec(&self.ffn.value)?,
+            down,
+            down_bias: linear_bias_vec(&self.ffn.down)?,
+            n_heads: self.attn.n_heads,
+            n_kv: self.attn.n_kv_heads,
+            head_dim: self.attn.head_dim,
+        })
+    }
+
     pub fn new(vb: VarBuilder, cfg: &NetworkConfig, _device: &Device) -> Result<Self> {
         Ok(Self {
             ln_attn: nn::layer_norm(cfg.dim, 1e-5, vb.pp("ln_attn"))?,
@@ -522,7 +577,32 @@ impl SharedNetwork {
         }).sum()
     }
 
+    fn transformer_stack_packed(&self) -> bool {
+        !self.blocks.is_empty()
+            && self.cfg.variant == NetworkVariant::Transformer
+            && self.blocks.iter().all(|b| match b {
+                Block::Transformer(t) => t.is_packed(),
+                Block::Mixer(_) => false,
+            })
+    }
+
     pub fn forward(&self, xs: &Tensor, mask: Option<&Tensor>) -> Result<Tensor> {
+        if self.transformer_stack_packed() {
+            let mut bufs = Vec::with_capacity(self.blocks.len());
+            for block in &self.blocks {
+                match block {
+                    Block::Transformer(b) => bufs.push(b.packed_layer_bufs()?),
+                    Block::Mixer(_) => unreachable!(),
+                }
+            }
+            let rope_cos = self.rope_cos.as_ref().unwrap();
+            let rope_sin = self.rope_sin.as_ref().unwrap();
+            if let Ok(out) = crate::kernel_dispatch::packed_transformer_stack(
+                xs, &bufs, rope_cos, rope_sin, mask,
+            ) {
+                return Ok(out);
+            }
+        }
         let mut h = xs.clone();
         match self.cfg.variant {
             NetworkVariant::Transformer => {
